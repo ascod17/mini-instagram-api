@@ -15,22 +15,24 @@ import os
 
 def get_db_connection():
     try:
-        # Render-де DATABASE_URL айнымалысы қолданылады
+        # Ең алдымен Render-дегі DATABASE_URL-ді тексереміз
         db_url = os.environ.get('DATABASE_URL')
+        
         if db_url:
-            conn = psycopg2.connect(db_url)
+            # Егер Render-де болсақ, осы сілтемені қолданамыз
+            return psycopg2.connect(db_url, sslmode='require', cursor_factory=RealDictCursor)
         else:
-            # Егер DATABASE_URL жоқ болса (локальды болса)
-            conn = psycopg2.connect(
+            # Егер компьютеріңде болсаң (локальды), ескіше қосылады
+            return psycopg2.connect(
                 host="localhost",
                 database="instagram_db",
                 user="postgres",
                 password="ascod",
-                port="5432"
+                port="5432",
+                cursor_factory=RealDictCursor
             )
-        return conn
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Database Connection Error: {e}")
         return None
 
 # --- AUTH ---
