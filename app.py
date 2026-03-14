@@ -15,20 +15,13 @@ jwt = JWTManager(app)
 
 def get_db_connection():
     try:
-        # Render-дегі DATABASE_URL-ді алу
-        db_url = os.environ.get('DATABASE_URL')
-        if db_url:
-            # СІЛТЕМЕ БАР: Render базасына SSL арқылы қосылу (МІНДЕТТІ)
-            return psycopg2.connect(db_url, sslmode='require', cursor_factory=RealDictCursor)
-        else:
-            # СІЛТЕМЕ ЖОҚ: Локальды база
-            return psycopg2.connect(
-                host="localhost", database="instagram_db",
-                user="postgres", password="ascod", port="5432",
-                cursor_factory=RealDictCursor
-            )
+        # Ешқандай айнымалысыз, тікелей сілтеме
+        return psycopg2.connect(
+            "postgresql://instagram_db_c97l_user:0jBH2Iicx4Oc97mb5uIbsCK8M651q8xg@dpg-d6q4b0450q8c73abn2jg-a/instagram_db_c97l?sslmode=require",
+            cursor_factory=RealDictCursor
+        )
     except Exception as e:
-        print(f"DATABASE CONNECTION ERROR: {e}")
+        print(f"DATABASE ERROR: {e}")
         return None
 
 # --- 1. AUTH & REFRESH TOKENS ---
