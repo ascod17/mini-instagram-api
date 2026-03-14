@@ -31,7 +31,6 @@ def register():
     if not conn: return jsonify({"error": "Database connection failed"}), 500
     cur = conn.cursor()
     try:
-        # Email бағаны бар-жоғын тексеріп енгізу
         email = data.get('email', None)
         cur.execute(
             "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
@@ -158,6 +157,64 @@ def follow_user():
     cur.close()
     conn.close()
     return jsonify({"msg": "Жазылдыңыз"}), 201
+
+# --- 8. ЖАҢА ФУНКЦИЯЛАР (Search, Stories, Notes, Direct) ---
+
+@app.route('/search', methods=['GET'])
+def search_users():
+    username = request.args.get('username', '')
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, username FROM users WHERE username ILIKE %s", (f'%{username}%',))
+    results = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify(results), 200
+
+@app.route('/stories', methods=['POST'])
+@jwt_required()
+def add_story():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO stories (user_id, media_url) VALUES (%s, %s) RETURNING id", 
+                (user_id, data['media_url']))
+    story_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"id": story_id, "msg": "Сторис қосылды"}), 201
+
+@app.route('/notes', methods=['POST'])
+@jwt_required()
+def add_note():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO notes (user_id, text) VALUES (%s, %s) RETURNING id", 
+                (user_id, data['text']))
+    note_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"id": note_id, "msg": "Заметка сақталды"}), 201
+
+@app.route('/messages', methods=['POST'])
+@jwt_required()
+def send_message():
+    sender_id = get_jwt_identity()
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO messages (sender_id, receiver_id, message_text) VALUES (%s, %s, %s) RETURNING id", 
+                (sender_id, data['receiver_id'], data['message_text']))
+    msg_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"id": msg_id, "msg": "Хат жіберілді"}), 201
 
 # --- 7. RENDER INFRASTRUCTURE ---
 if __name__ == '__main__':
