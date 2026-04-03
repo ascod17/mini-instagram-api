@@ -22,12 +22,11 @@ def get_db_connection():
         print(f"DATABASE ERROR: {e}")
         return None
 
-# --- AUTH (Өзгеріссіз қалды) ---
+# --- AUTH ---
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
     conn = get_db_connection()
-    if not conn: return jsonify({"error": "DB failed"}), 500
     cur = conn.cursor()
     cur.execute("SELECT id, username FROM users WHERE username=%s AND password=%s", 
                 (data['username'], data['password']))
@@ -37,12 +36,11 @@ def login():
         return jsonify({"access_token": access_token, "username": user['username']}), 200
     return jsonify({"msg": "Қате!"}), 401
 
-# --- FEED (ЖӨНДЕЛДІ: Енді әр посттың иесінің аты бірге келеді) ---
+# --- FEED (Есімдер енді дұрыс шығады) ---
 @app.route('/posts', methods=['GET'])
 def get_posts():
     conn = get_db_connection()
     cur = conn.cursor()
-    # JOIN арқылы users кестесінен username-ді қосып аламыз
     cur.execute("""
         SELECT p.*, u.username, m.url as image_url 
         FROM posts p 
@@ -55,15 +53,13 @@ def get_posts():
     conn.close()
     return jsonify(posts), 200
 
-# --- PROFILE (ЖӨНДЕЛДІ: Статистика мен суреттер форматы Котлинге ыңғайланды) ---
+# --- PROFILE (Суреттер мен статистика үшін) ---
 @app.route('/profile', methods=['GET'])
 @jwt_required()
 def get_my_profile():
     user_id = get_jwt_identity()
     conn = get_db_connection()
     cur = conn.cursor()
-    
-    # Қолданушы мәліметтері
     cur.execute("""
         SELECT username, 
                (SELECT COUNT(*) FROM posts WHERE author_id = %s) as posts_count,
@@ -73,7 +69,6 @@ def get_my_profile():
     """, (user_id, user_id, user_id, user_id))
     user_info = cur.fetchone()
 
-    # Посттар (суреттерімен)
     cur.execute("""
         SELECT p.id, m.url as image_url 
         FROM posts p 
@@ -82,15 +77,42 @@ def get_my_profile():
         ORDER BY p.id DESC
     """, (user_id,))
     posts = cur.fetchall()
-
     cur.close()
     conn.close()
-    return jsonify({
-        "user": user_info,
-        "posts": posts
-    }), 200
+    return jsonify({"user": user_info, "posts": posts}), 200
 
-# --- POSTS КӨШІРУ (Create Post бөлімі) ---
+# --- STORIES (ОСЫ ЖЕРДІ ҚАЙТА ҚОСТЫМ) ---
+@app.route('/stories', methods=['POST'])
+@jwt_required()
+def add_story():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO stories (user_id, media_url) VALUES (%s, %s) RETURNING id", 
+                (user_id, data['media_url']))
+    story_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"id": story_id, "msg": "Сторис қосылды"}), 201
+
+@app.route('/stories', methods=['GET'])
+def get_stories():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT s.*, u.username 
+        FROM stories s 
+        JOIN users u ON s.user_id = u.id 
+        ORDER BY s.created_at DESC
+    """)
+    stories = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify(stories), 200
+
+# --- CREATE POST ---
 @app.route('/posts', methods=['POST'])
 @jwt_required()
 def create_post():
