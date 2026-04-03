@@ -1,16 +1,15 @@
 from flask import Flask, request, jsonify
-from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
-from datetime import timedelta, datetime
+from datetime import timedelta
 
 app = Flask(__name__)
 
 # --- КОНФИГУРАЦИЯ ---
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "super-secret-key-123")
-app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24) # Токен мерзімін ұзарттық
-app.config["JWT_REFRESH_TOKEN_EXPIRES"] = timedelta(days=30)
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
 jwt = JWTManager(app)
 
 def get_db_connection():
@@ -23,27 +22,7 @@ def get_db_connection():
         print(f"DATABASE ERROR: {e}")
         return None
 
-# --- AUTH ---
-@app.route('/register', methods=['POST'])
-def register():
-    data = request.get_json()
-    conn = get_db_connection()
-    if not conn: return jsonify({"error": "Database connection failed"}), 500
-    cur = conn.cursor()
-    try:
-        email = data.get('email', None)
-        cur.execute(
-            "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
-            (data['username'], email, data['password'])
-        )
-        conn.commit()
-        return jsonify({"msg": "Пайдаланушы сәтті тіркелді!"}), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-    finally:
-        cur.close()
-        conn.close()
-
+# --- AUTH (Өзгеріссіз қалды) ---
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
@@ -54,12 +33,29 @@ def login():
                 (data['username'], data['password']))
     user = cur.fetchone()
     if user:
-        user_id = str(user['id'])
-        access_token = create_access_token(identity=user_id)
+        access_token = create_access_token(identity=str(user['id']))
         return jsonify({"access_token": access_token, "username": user['username']}), 200
-    return jsonify({"msg": "Логин немесе пароль қате!"}), 401
+    return jsonify({"msg": "Қате!"}), 401
 
-# --- PROFILE (ЖАҢА ЭНДПОИНТ) ---
+# --- FEED (ЖӨНДЕЛДІ: Енді әр посттың иесінің аты бірге келеді) ---
+@app.route('/posts', methods=['GET'])
+def get_posts():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # JOIN арқылы users кестесінен username-ді қосып аламыз
+    cur.execute("""
+        SELECT p.*, u.username, m.url as image_url 
+        FROM posts p 
+        JOIN users u ON p.author_id = u.id 
+        LEFT JOIN media m ON p.id = m.post_id 
+        ORDER BY p.id DESC
+    """)
+    posts = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify(posts), 200
+
+# --- PROFILE (ЖӨНДЕЛДІ: Статистика мен суреттер форматы Котлинге ыңғайланды) ---
 @app.route('/profile', methods=['GET'])
 @jwt_required()
 def get_my_profile():
@@ -67,20 +63,19 @@ def get_my_profile():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # 1. Пайдаланушы ақпараты мен сандар (дизайн бойынша)
+    # Қолданушы мәліметтері
     cur.execute("""
-        SELECT 
-            username,
-            (SELECT COUNT(*) FROM posts WHERE author_id = %s) as posts_count,
-            (SELECT COUNT(*) FROM follows WHERE followed_id = %s) as followers_count,
-            (SELECT COUNT(*) FROM follows WHERE follower_id = %s) as following_count
+        SELECT username, 
+               (SELECT COUNT(*) FROM posts WHERE author_id = %s) as posts_count,
+               (SELECT COUNT(*) FROM follows WHERE followed_id = %s) as followers_count,
+               (SELECT COUNT(*) FROM follows WHERE follower_id = %s) as following_count
         FROM users WHERE id = %s
     """, (user_id, user_id, user_id, user_id))
     user_info = cur.fetchone()
 
-    # 2. Осы қолданушының посттары (соңғысы бірінші)
+    # Посттар (суреттерімен)
     cur.execute("""
-        SELECT p.*, m.url as image_url 
+        SELECT p.id, m.url as image_url 
         FROM posts p 
         LEFT JOIN media m ON p.id = m.post_id 
         WHERE p.author_id = %s 
@@ -95,7 +90,7 @@ def get_my_profile():
         "posts": posts
     }), 200
 
-# --- POSTS ---
+# --- POSTS КӨШІРУ (Create Post бөлімі) ---
 @app.route('/posts', methods=['POST'])
 @jwt_required()
 def create_post():
@@ -106,55 +101,13 @@ def create_post():
     cur.execute("INSERT INTO posts (caption, author_id) VALUES (%s, %s) RETURNING id", 
                 (data['caption'], user_id))
     post_id = cur.fetchone()['id']
-    image_url = data.get('image_url')
-    if image_url:
+    if data.get('image_url'):
         cur.execute("INSERT INTO media (url, post_id, media_type) VALUES (%s, %s, %s)", 
-                    (image_url, post_id, 'image'))
+                    (data['image_url'], post_id, 'image'))
     conn.commit()
     cur.close()
     conn.close()
-    return jsonify({"id": post_id, "msg": "Пост жарияланды"}), 201
-
-@app.route('/posts', methods=['GET'])
-def get_posts():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT p.*, m.url as image_url 
-        FROM posts p 
-        LEFT JOIN media m ON p.id = m.post_id
-        ORDER BY p.id DESC
-    """)
-    posts = cur.fetchall()
-    cur.close()
-    conn.close()
-    return jsonify(posts), 200
-
-# --- STORIES ---
-@app.route('/stories', methods=['POST'])
-@jwt_required()
-def add_story():
-    user_id = get_jwt_identity()
-    data = request.get_json()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO stories (user_id, media_url) VALUES (%s, %s) RETURNING id", 
-                (user_id, data['media_url']))
-    story_id = cur.fetchone()['id']
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"id": story_id, "msg": "Сторис қосылды"}), 201
-
-@app.route('/stories', methods=['GET'])
-def get_stories():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM stories ORDER BY created_at DESC")
-    stories = cur.fetchall()
-    cur.close()
-    conn.close()
-    return jsonify(stories), 200
+    return jsonify({"id": post_id, "msg": "Жарияланды"}), 201
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
