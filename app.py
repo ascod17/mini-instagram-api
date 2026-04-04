@@ -56,7 +56,23 @@ def get_posts():
     conn.close()
     return jsonify(posts), 200
 
-# --- STORIES (Есімдерді дұрыстау үшін JOIN қосылды) ---
+# --- ПОСТТЫ ӨШІРУ ---
+@app.route('/posts/<int:post_id>', methods=['DELETE'])
+@jwt_required()
+def delete_post(post_id):
+    user_id = get_jwt_identity()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Тек өз постыңды өшіре алуың үшін тексеру
+    cur.execute("DELETE FROM posts WHERE id = %s AND author_id = %s", (post_id, user_id))
+    if cur.rowcount == 0:
+        return jsonify({"msg": "Пост табылмады немесе рұқсат жоқ"}), 404
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"msg": "Пост өшірілді"}), 200
+
+# --- STORIES (GET) ---
 @app.route('/stories', methods=['GET'])
 @jwt_required(optional=True)
 def get_stories():
@@ -75,6 +91,7 @@ def get_stories():
     conn.close()
     return jsonify(stories), 200
 
+# --- СТОРИСТІ ҚОСУ ---
 @app.route('/stories', methods=['POST'])
 @jwt_required()
 def add_story():
@@ -89,6 +106,21 @@ def add_story():
     cur.close()
     conn.close()
     return jsonify({"id": story_id, "msg": "Сторис қосылды"}), 201
+
+# --- СТОРИСТІ ӨШІРУ ---
+@app.route('/stories/<int:story_id>', methods=['DELETE'])
+@jwt_required()
+def delete_story(story_id):
+    user_id = get_jwt_identity()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM stories WHERE id = %s AND user_id = %s", (story_id, user_id))
+    if cur.rowcount == 0:
+        return jsonify({"msg": "Сторис табылмады немесе рұқсат жоқ"}), 404
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"msg": "Сторис өшірілді"}), 200
 
 # --- PROFILE ---
 @app.route('/profile', methods=['GET'])
