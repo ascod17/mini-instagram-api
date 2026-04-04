@@ -32,20 +32,17 @@ def login():
                 (data['username'], data['password']))
     user = cur.fetchone()
     if user:
-        # ID-ді токенге жібереміз
         access_token = create_access_token(identity=str(user['id']))
         return jsonify({"access_token": access_token, "username": user['username']}), 200
     return jsonify({"msg": "Қате!"}), 401
 
-# --- FEED (Ортақ таспа және Follow логикасы) ---
+# --- FEED ---
 @app.route('/posts', methods=['GET'])
 @jwt_required(optional=True)
 def get_posts():
-    current_user_id = get_jwt_identity() # Қазір кім кіріп тұрғанын білеміз
+    current_user_id = get_jwt_identity()
     conn = get_db_connection()
     cur = conn.cursor()
-    
-    # SQL-де авторды тексеріп, is_my_post мәнін қайтарамыз
     cur.execute("""
         SELECT p.*, u.username, m.url as image_url,
                CASE WHEN p.author_id = %s THEN true ELSE false END as is_my_post
@@ -54,45 +51,30 @@ def get_posts():
         LEFT JOIN media m ON p.id = m.post_id 
         ORDER BY p.id DESC
     """, (current_user_id,))
-    
     posts = cur.fetchall()
     cur.close()
     conn.close()
     return jsonify(posts), 200
 
-# --- PROFILE (Жеке аккаунт деректері мен суреттер) ---
-@app.route('/profile', methods=['GET'])
-@jwt_required()
-def get_my_profile():
-    user_id = get_jwt_identity()
+# --- STORIES (Есімдерді дұрыстау үшін JOIN қосылды) ---
+@app.route('/stories', methods=['GET'])
+@jwt_required(optional=True)
+def get_stories():
+    current_user_id = get_jwt_identity()
     conn = get_db_connection()
     cur = conn.cursor()
-    
-    # Статистика
     cur.execute("""
-        SELECT username, 
-               (SELECT COUNT(*) FROM posts WHERE author_id = %s) as posts_count,
-               (SELECT COUNT(*) FROM follows WHERE followed_id = %s) as followers_count,
-               (SELECT COUNT(*) FROM follows WHERE follower_id = %s) as following_count
-        FROM users WHERE id = %s
-    """, (user_id, user_id, user_id, user_id))
-    user_info = cur.fetchone()
-
-    # Тек осы юзердің посттары (Сетка үшін)
-    cur.execute("""
-        SELECT p.id, m.url as image_url 
-        FROM posts p 
-        LEFT JOIN media m ON p.id = m.post_id 
-        WHERE p.author_id = %s 
-        ORDER BY p.id DESC
-    """, (user_id,))
-    posts = cur.fetchall()
-    
+        SELECT s.*, u.username,
+               CASE WHEN s.user_id = %s THEN true ELSE false END as is_my_story
+        FROM stories s 
+        JOIN users u ON s.user_id = u.id 
+        ORDER BY s.created_at DESC
+    """, (current_user_id,))
+    stories = cur.fetchall()
     cur.close()
     conn.close()
-    return jsonify({"user": user_info, "posts": posts}), 200
+    return jsonify(stories), 200
 
-# --- STORIES ---
 @app.route('/stories', methods=['POST'])
 @jwt_required()
 def add_story():
@@ -108,20 +90,33 @@ def add_story():
     conn.close()
     return jsonify({"id": story_id, "msg": "Сторис қосылды"}), 201
 
-@app.route('/stories', methods=['GET'])
-def get_stories():
+# --- PROFILE ---
+@app.route('/profile', methods=['GET'])
+@jwt_required()
+def get_my_profile():
+    user_id = get_jwt_identity()
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT s.*, u.username 
-        FROM stories s 
-        JOIN users u ON s.user_id = u.id 
-        ORDER BY s.created_at DESC
-    """)
-    stories = cur.fetchall()
+        SELECT username, 
+               (SELECT COUNT(*) FROM posts WHERE author_id = %s) as posts_count,
+               (SELECT COUNT(*) FROM follows WHERE followed_id = %s) as followers_count,
+               (SELECT COUNT(*) FROM follows WHERE follower_id = %s) as following_count
+        FROM users WHERE id = %s
+    """, (user_id, user_id, user_id, user_id))
+    user_info = cur.fetchone()
+
+    cur.execute("""
+        SELECT p.id, m.url as image_url 
+        FROM posts p 
+        LEFT JOIN media m ON p.id = m.post_id 
+        WHERE p.author_id = %s 
+        ORDER BY p.id DESC
+    """, (user_id,))
+    posts = cur.fetchall()
     cur.close()
     conn.close()
-    return jsonify(stories), 200
+    return jsonify({"user": user_info, "posts": posts}), 200
 
 # --- CREATE POST ---
 @app.route('/posts', methods=['POST'])
