@@ -32,34 +32,43 @@ def login():
                 (data['username'], data['password']))
     user = cur.fetchone()
     if user:
+        # ID-ді токенге жібереміз
         access_token = create_access_token(identity=str(user['id']))
         return jsonify({"access_token": access_token, "username": user['username']}), 200
     return jsonify({"msg": "Қате!"}), 401
 
-# --- FEED (Есімдер енді дұрыс шығады) ---
+# --- FEED (Ортақ таспа және Follow логикасы) ---
 @app.route('/posts', methods=['GET'])
+@jwt_required(optional=True)
 def get_posts():
+    current_user_id = get_jwt_identity() # Қазір кім кіріп тұрғанын білеміз
     conn = get_db_connection()
     cur = conn.cursor()
+    
+    # SQL-де авторды тексеріп, is_my_post мәнін қайтарамыз
     cur.execute("""
-        SELECT p.*, u.username, m.url as image_url 
+        SELECT p.*, u.username, m.url as image_url,
+               CASE WHEN p.author_id = %s THEN true ELSE false END as is_my_post
         FROM posts p 
         JOIN users u ON p.author_id = u.id 
         LEFT JOIN media m ON p.id = m.post_id 
         ORDER BY p.id DESC
-    """)
+    """, (current_user_id,))
+    
     posts = cur.fetchall()
     cur.close()
     conn.close()
     return jsonify(posts), 200
 
-# --- PROFILE (Суреттер мен статистика үшін) ---
+# --- PROFILE (Жеке аккаунт деректері мен суреттер) ---
 @app.route('/profile', methods=['GET'])
 @jwt_required()
 def get_my_profile():
     user_id = get_jwt_identity()
     conn = get_db_connection()
     cur = conn.cursor()
+    
+    # Статистика
     cur.execute("""
         SELECT username, 
                (SELECT COUNT(*) FROM posts WHERE author_id = %s) as posts_count,
@@ -69,6 +78,7 @@ def get_my_profile():
     """, (user_id, user_id, user_id, user_id))
     user_info = cur.fetchone()
 
+    # Тек осы юзердің посттары (Сетка үшін)
     cur.execute("""
         SELECT p.id, m.url as image_url 
         FROM posts p 
@@ -77,11 +87,12 @@ def get_my_profile():
         ORDER BY p.id DESC
     """, (user_id,))
     posts = cur.fetchall()
+    
     cur.close()
     conn.close()
     return jsonify({"user": user_info, "posts": posts}), 200
 
-# --- STORIES (ОСЫ ЖЕРДІ ҚАЙТА ҚОСТЫМ) ---
+# --- STORIES ---
 @app.route('/stories', methods=['POST'])
 @jwt_required()
 def add_story():
