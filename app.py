@@ -13,6 +13,10 @@ app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "super-secret-ke
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
 app.config['UPLOAD_FOLDER'] = 'uploads'  # Суреттер сақталатын папка
 
+# СЕНІҢ СЕРВЕРІҢНІҢ СІЛТЕМЕСІ (Осы жерді Render-дегі сілтемеңмен ауыстыр)
+# Мысалы: "https://instagram-db-c97l.onrender.com"
+BASE_URL = "https://instagram-db-c97l.onrender.com"
+
 # Папка жоқ болса жасау
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
@@ -68,7 +72,7 @@ def get_posts():
     conn.close()
     return jsonify(posts), 200
 
-# --- CREATE POST (Әмбебап: Сурет файлы немесе JSON URL) ---
+# --- CREATE POST (ЖАҢАРТЫЛДЫ: Толық URL сақтайды) ---
 @app.route('/posts', methods=['POST'])
 @jwt_required()
 def create_post():
@@ -76,16 +80,14 @@ def create_post():
     caption = request.form.get('caption') or (request.json.get('caption') if request.is_json else "")
     image_url = None
 
-    # 1. Егер телефоннан файл келсе
     if 'image' in request.files:
         file = request.files['image']
         if file.filename != '':
             filename = secure_filename(file.filename)
             file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-            # Сервердің мекен-жайын қосу керек (Render URL болса соны)
-            image_url = f"/uploads/{filename}"
+            # ОСЫ ЖЕРДЕ ТОЛЫҚ СІЛТЕМЕ ЖАСАЛАДЫ
+            image_url = f"{BASE_URL}/uploads/{filename}"
     
-    # 2. Егер Postman-нан JSON келсе
     elif request.is_json and 'image_url' in request.json:
         image_url = request.json['image_url']
 
@@ -140,7 +142,7 @@ def get_stories():
     conn.close()
     return jsonify(stories), 200
 
-# --- ADD STORY (Файл жүктеу мүмкіндігімен) ---
+# --- ADD STORY (ЖАҢАРТЫЛДЫ: Толық URL сақтайды) ---
 @app.route('/stories', methods=['POST'])
 @jwt_required()
 def add_story():
@@ -151,7 +153,8 @@ def add_story():
         file = request.files['image']
         filename = secure_filename(file.filename)
         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-        media_url = f"/uploads/{filename}"
+        # ОСЫ ЖЕРДЕ ТОЛЫҚ СІЛТЕМЕ ЖАСАЛАДЫ
+        media_url = f"{BASE_URL}/uploads/{filename}"
     elif request.is_json:
         media_url = request.json.get('media_url')
 
@@ -191,7 +194,6 @@ def get_my_profile():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # Юзер статистикасы
     cur.execute("""
         SELECT username, 
                (SELECT COUNT(*) FROM posts WHERE author_id = %s) as posts_count,
@@ -201,7 +203,6 @@ def get_my_profile():
     """, (user_id, user_id, user_id, user_id))
     user_info = cur.fetchone()
 
-    # Юзердің өз посттары
     cur.execute("""
         SELECT p.id, m.url as image_url, p.caption 
         FROM posts p 
