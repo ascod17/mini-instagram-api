@@ -14,7 +14,7 @@ app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 
 # СЕНІҢ СЕРВЕРІҢНІҢ СІЛТЕМЕСІ
-BASE_URL = "https://mini-instagram-api.onrender.com" 
+BASE_URL = "https://mini-instagram-api-8ucb.onrender.com" 
 
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
