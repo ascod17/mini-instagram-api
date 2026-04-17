@@ -11,13 +11,11 @@ app = Flask(__name__)
 # --- КОНФИГУРАЦИЯ ---
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "super-secret-key-123")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
-app.config['UPLOAD_FOLDER'] = 'uploads'  # Суреттер сақталатын папка
+app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# СЕНІҢ СЕРВЕРІҢНІҢ СІЛТЕМЕСІ (Осы жерді Render-дегі сілтемеңмен ауыстыр)
-# Мысалы: "https://instagram-db-c97l.onrender.com"
-BASE_URL = "https://instagram-db-c97l.onrender.com"
+# СЕНІҢ СЕРВЕРІҢНІҢ СІЛТЕМЕСІ
+BASE_URL = "https://mini-instagram-api.onrender.com" 
 
-# Папка жоқ болса жасау
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
 
@@ -25,20 +23,36 @@ jwt = JWTManager(app)
 
 def get_db_connection():
     try:
+        # ЖАҢА INTERNAL URL ПАЙДАЛАНЫЛДЫ
         return psycopg2.connect(
-            "postgresql://instagram_db_c97l_user:0jBH2Iicx4Oc97mb5uIbsCK8M651q8xg@dpg-d6q4b0450q8c73abn2jg-a/instagram_db_c97l?sslmode=require",
+            "postgresql://postgre:W9qgpjrkJHxKKa7HJuSH38iExfAV1Zx6@dpg-d7h1gej7uimc73d2irgg-a/instagram_db_lota?sslmode=require",
             cursor_factory=RealDictCursor
         )
     except Exception as e:
         print(f"DATABASE ERROR: {e}")
         return None
 
-# Суреттерді браузер немесе телефон арқылы көру үшін жол
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# --- AUTH ---
+# --- AUTH (LOGIN & REGISTER) ---
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
+                    (data['username'], data['email'], data['password']))
+        conn.commit()
+        return jsonify({"msg": "Тіркелу сәтті өтті!"}), 201
+    except Exception as e:
+        return jsonify({"msg": "Қате: Мұндай қолданушы бар болуы мүмкін"}), 400
+    finally:
+        cur.close()
+        conn.close()
+
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
@@ -47,10 +61,12 @@ def login():
     cur.execute("SELECT id, username FROM users WHERE username=%s AND password=%s", 
                 (data['username'], data['password']))
     user = cur.fetchone()
+    cur.close()
+    conn.close()
     if user:
         access_token = create_access_token(identity=str(user['id']))
         return jsonify({"access_token": access_token, "username": user['username']}), 200
-    return jsonify({"msg": "Қате!"}), 401
+    return jsonify({"msg": "Логин немесе пароль қате!"}), 401
 
 # --- FEED (Барлық посттар) ---
 @app.route('/posts', methods=['GET'])
@@ -72,7 +88,7 @@ def get_posts():
     conn.close()
     return jsonify(posts), 200
 
-# --- CREATE POST (ЖАҢАРТЫЛДЫ: Толық URL сақтайды) ---
+# --- CREATE POST ---
 @app.route('/posts', methods=['POST'])
 @jwt_required()
 def create_post():
@@ -85,7 +101,6 @@ def create_post():
         if file.filename != '':
             filename = secure_filename(file.filename)
             file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-            # ОСЫ ЖЕРДЕ ТОЛЫҚ СІЛТЕМЕ ЖАСАЛАДЫ
             image_url = f"{BASE_URL}/uploads/{filename}"
     
     elif request.is_json and 'image_url' in request.json:
@@ -99,10 +114,8 @@ def create_post():
     cur.execute("INSERT INTO posts (caption, author_id) VALUES (%s, %s) RETURNING id", 
                 (caption, user_id))
     post_id = cur.fetchone()['id']
-    
     cur.execute("INSERT INTO media (url, post_id, media_type) VALUES (%s, %s, %s)", 
                 (image_url, post_id, 'image'))
-    
     conn.commit()
     cur.close()
     conn.close()
@@ -123,7 +136,7 @@ def delete_post(post_id):
     conn.close()
     return jsonify({"msg": "Пост өшірілді"}), 200
 
-# --- STORIES (GET) ---
+# --- STORIES ---
 @app.route('/stories', methods=['GET'])
 @jwt_required(optional=True)
 def get_stories():
@@ -142,18 +155,15 @@ def get_stories():
     conn.close()
     return jsonify(stories), 200
 
-# --- ADD STORY (ЖАҢАРТЫЛДЫ: Толық URL сақтайды) ---
 @app.route('/stories', methods=['POST'])
 @jwt_required()
 def add_story():
     user_id = get_jwt_identity()
     media_url = None
-
     if 'image' in request.files:
         file = request.files['image']
         filename = secure_filename(file.filename)
         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-        # ОСЫ ЖЕРДЕ ТОЛЫҚ СІЛТЕМЕ ЖАСАЛАДЫ
         media_url = f"{BASE_URL}/uploads/{filename}"
     elif request.is_json:
         media_url = request.json.get('media_url')
@@ -171,7 +181,6 @@ def add_story():
     conn.close()
     return jsonify({"id": story_id, "msg": "Сторис қосылды"}), 201
 
-# --- DELETE STORY ---
 @app.route('/stories/<int:story_id>', methods=['DELETE'])
 @jwt_required()
 def delete_story(story_id):
@@ -186,14 +195,13 @@ def delete_story(story_id):
     conn.close()
     return jsonify({"msg": "Сторис өшірілді"}), 200
 
-# --- PROFILE (Тек менің деректерім) ---
+# --- PROFILE ---
 @app.route('/profile', methods=['GET'])
 @jwt_required()
 def get_my_profile():
     user_id = get_jwt_identity()
     conn = get_db_connection()
     cur = conn.cursor()
-    
     cur.execute("""
         SELECT username, 
                (SELECT COUNT(*) FROM posts WHERE author_id = %s) as posts_count,
@@ -202,7 +210,6 @@ def get_my_profile():
         FROM users WHERE id = %s
     """, (user_id, user_id, user_id, user_id))
     user_info = cur.fetchone()
-
     cur.execute("""
         SELECT p.id, m.url as image_url, p.caption 
         FROM posts p 
@@ -211,10 +218,38 @@ def get_my_profile():
         ORDER BY p.id DESC
     """, (user_id,))
     posts = cur.fetchall()
-    
     cur.close()
     conn.close()
     return jsonify({"user": user_info, "posts": posts}), 200
+
+# --- COMMENTS (ЖАҢА ФУНКЦИЯ) ---
+@app.route('/posts/<int:post_id>/comments', methods=['GET'])
+def get_comments(post_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT c.*, u.username FROM comments c 
+        JOIN users u ON c.user_id = u.id 
+        WHERE c.post_id = %s ORDER BY c.created_at ASC
+    """, (post_id,))
+    comments = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify(comments), 200
+
+@app.route('/posts/<int:post_id>/comments', methods=['POST'])
+@jwt_required()
+def add_comment(post_id):
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO comments (post_id, user_id, comment_text) VALUES (%s, %s, %s)",
+                (post_id, user_id, data['comment_text']))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"msg": "Пікір қосылды"}), 201
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
