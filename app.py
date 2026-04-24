@@ -1,11 +1,12 @@
 from flask import Flask, request, jsonify, send_from_directory
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
 from flask_sock import Sock
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
-from datetime import timedelta
+from datetime import timedelta, datetime
 from werkzeug.utils import secure_filename
+import json
 
 app = Flask(__name__)
 sock = Sock(app)
@@ -20,6 +21,7 @@ if not os.path.exists(app.config["UPLOAD_FOLDER"]):
     os.makedirs(app.config["UPLOAD_FOLDER"])
 
 jwt = JWTManager(app)
+active_connections = {}
 
 
 def get_db_connection():
@@ -37,6 +39,40 @@ def to_int_or_none(value):
     if value is None:
         return None
     return int(value)
+
+
+def build_chat_id(user_a: int, user_b: int) -> str:
+    first, second = sorted([int(user_a), int(user_b)])
+    return f"{first}_{second}"
+
+
+def ensure_chat_tables(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_rooms (
+            chat_id TEXT PRIMARY KEY,
+            user_one_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            user_two_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (user_one_id, user_two_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id SERIAL PRIMARY KEY,
+            chat_id TEXT NOT NULL REFERENCES chat_rooms(chat_id) ON DELETE CASCADE,
+            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            receiver_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.commit()
+    cur.close()
 
 
 @app.route("/uploads/<filename>")
@@ -85,7 +121,11 @@ def login():
 
     if user:
         access_token = create_access_token(identity=str(user["id"]))
-        return jsonify({"access_token": access_token, "username": user["username"]}), 200
+        return jsonify({
+            "access_token": access_token,
+            "username": user["username"],
+            "id": user["id"]
+        }), 200
 
     return jsonify({"msg": "Логин немесе пароль қате!"}), 401
 
@@ -197,6 +237,51 @@ def delete_post(post_id):
     cur.close()
     conn.close()
     return jsonify({"msg": "Пост өшірілді"}), 200
+
+
+@app.route("/posts/<int:post_id>/like", methods=["POST"])
+@jwt_required()
+def like_post(post_id):
+    current_user_id = int(get_jwt_identity())
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"status": "error", "message": "Database connection error"}), 500
+
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM posts WHERE id = %s", (post_id,))
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return jsonify({"status": "error", "message": "Post not found"}), 404
+
+    cur.execute(
+        """
+        INSERT INTO likes (post_id, user_id)
+        VALUES (%s, %s)
+        ON CONFLICT (post_id, user_id) DO NOTHING
+        """,
+        (post_id, current_user_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"status": "success", "message": "Liked"}), 200
+
+
+@app.route("/posts/<int:post_id>/like", methods=["DELETE"])
+@jwt_required()
+def unlike_post(post_id):
+    current_user_id = int(get_jwt_identity())
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"status": "error", "message": "Database connection error"}), 500
+
+    cur = conn.cursor()
+    cur.execute("DELETE FROM likes WHERE post_id = %s AND user_id = %s", (post_id, current_user_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"status": "success", "message": "Unliked"}), 200
 
 
 @app.route("/stories", methods=["GET"])
@@ -506,49 +591,244 @@ def get_following(user_id):
     return jsonify(following), 200
 
 
-@app.route("/posts/<int:post_id>/like", methods=["POST"])
+@app.route("/chats/direct", methods=["POST"])
 @jwt_required()
-def like_post(post_id):
+def create_or_get_direct_chat():
     current_user_id = int(get_jwt_identity())
+    data = request.get_json() or {}
+    recipient_id = int(data["recipient_id"])
+
+    if current_user_id == recipient_id:
+        return jsonify({"msg": "Cannot open direct chat with yourself"}), 400
+
+    chat_id = build_chat_id(current_user_id, recipient_id)
+    user_one_id, user_two_id = sorted([current_user_id, recipient_id])
+
     conn = get_db_connection()
     if conn is None:
-        return jsonify({"status": "error", "message": "Database connection error"}), 500
+        return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_chat_tables(conn)
     cur = conn.cursor()
-    cur.execute("SELECT id FROM posts WHERE id = %s", (post_id,))
-    if cur.fetchone() is None:
+
+    cur.execute("SELECT id, username FROM users WHERE id = %s", (recipient_id,))
+    other_user = cur.fetchone()
+    if other_user is None:
         cur.close()
         conn.close()
-        return jsonify({"status": "error", "message": "Post not found"}), 404
+        return jsonify({"msg": "User not found"}), 404
 
     cur.execute(
         """
-        INSERT INTO likes (post_id, user_id)
-        VALUES (%s, %s)
-        ON CONFLICT (post_id, user_id) DO NOTHING
+        INSERT INTO chat_rooms (chat_id, user_one_id, user_two_id)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (chat_id) DO NOTHING
         """,
-        (post_id, current_user_id)
+        (chat_id, user_one_id, user_two_id)
     )
     conn.commit()
+
+    cur.execute(
+        """
+        SELECT text, created_at
+        FROM chat_messages
+        WHERE chat_id = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (chat_id,)
+    )
+    last_message = cur.fetchone()
+
     cur.close()
     conn.close()
-    return jsonify({"status": "success", "message": "Liked"}), 200
+
+    return jsonify({
+        "chat_id": chat_id,
+        "other_user_id": other_user["id"],
+        "other_username": other_user["username"],
+        "last_message": last_message["text"] if last_message else None,
+        "last_message_at": str(last_message["created_at"]) if last_message else None,
+        "unread_count": 0
+    }), 200
 
 
-@app.route("/posts/<int:post_id>/like", methods=["DELETE"])
+@app.route("/chats", methods=["GET"])
 @jwt_required()
-def unlike_post(post_id):
+def get_chats():
     current_user_id = int(get_jwt_identity())
     conn = get_db_connection()
     if conn is None:
-        return jsonify({"status": "error", "message": "Database connection error"}), 500
+        return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_chat_tables(conn)
     cur = conn.cursor()
-    cur.execute("DELETE FROM likes WHERE post_id = %s AND user_id = %s", (post_id, current_user_id))
-    conn.commit()
+
+    cur.execute(
+        """
+        SELECT
+            cr.chat_id,
+            CASE
+                WHEN cr.user_one_id = %s THEN other_u.id
+                ELSE own_u.id
+            END AS other_user_id,
+            CASE
+                WHEN cr.user_one_id = %s THEN other_u.username
+                ELSE own_u.username
+            END AS other_username,
+            last_msg.text AS last_message,
+            last_msg.created_at AS last_message_at,
+            0 AS unread_count
+        FROM chat_rooms cr
+        JOIN users own_u ON own_u.id = cr.user_one_id
+        JOIN users other_u ON other_u.id = cr.user_two_id
+        LEFT JOIN LATERAL (
+            SELECT text, created_at
+            FROM chat_messages cm
+            WHERE cm.chat_id = cr.chat_id
+            ORDER BY cm.created_at DESC
+            LIMIT 1
+        ) last_msg ON true
+        WHERE cr.user_one_id = %s OR cr.user_two_id = %s
+        ORDER BY last_msg.created_at DESC NULLS LAST, cr.created_at DESC
+        """,
+        (current_user_id, current_user_id, current_user_id, current_user_id)
+    )
+    chats = cur.fetchall()
     cur.close()
     conn.close()
-    return jsonify({"status": "success", "message": "Unliked"}), 200
+    return jsonify(chats), 200
+
+
+@app.route("/chats/<chat_id>/messages", methods=["GET"])
+@jwt_required()
+def get_chat_messages(chat_id):
+    current_user_id = int(get_jwt_identity())
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"msg": "Database connection error"}), 500
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1
+        FROM chat_rooms
+        WHERE chat_id = %s AND (user_one_id = %s OR user_two_id = %s)
+        """,
+        (chat_id, current_user_id, current_user_id)
+    )
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return jsonify({"msg": "Chat not found"}), 404
+
+    cur.execute(
+        """
+        SELECT
+            cm.id::text AS id,
+            cm.chat_id,
+            cm.sender_id,
+            sender.username AS sender_username,
+            cm.receiver_id,
+            cm.text,
+            cm.created_at
+        FROM chat_messages cm
+        JOIN users sender ON sender.id = cm.sender_id
+        WHERE cm.chat_id = %s
+        ORDER BY cm.created_at ASC
+        """,
+        (chat_id,)
+    )
+    messages = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify(messages), 200
+
+
+@sock.route("/ws/chat")
+def chat_socket(ws):
+    token = request.args.get("token")
+    chat_id = request.args.get("chat_id")
+
+    if not token or not chat_id:
+        ws.close()
+        return
+
+    try:
+        decoded = decode_token(token)
+        current_user_id = int(decoded["sub"])
+    except Exception:
+        ws.close()
+        return
+
+    room_connections = active_connections.setdefault(chat_id, [])
+    room_connections.append(ws)
+
+    try:
+        while True:
+            raw_message = ws.receive()
+            if raw_message is None:
+                break
+
+            data = json.loads(raw_message)
+            if data.get("type") != "message":
+                continue
+
+            payload = data.get("payload") or {}
+            sender_id = int(payload["sender_id"])
+            receiver_id = int(payload["receiver_id"])
+            text = payload["text"].strip()
+
+            if sender_id != current_user_id or not text:
+                continue
+
+            created_at = datetime.utcnow().isoformat()
+
+            conn = get_db_connection()
+            if conn is None:
+                continue
+
+            ensure_chat_tables(conn)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO chat_messages (chat_id, sender_id, receiver_id, text, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (chat_id, sender_id, receiver_id, text, created_at)
+            )
+            message_id = cur.fetchone()["id"]
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            outgoing = {
+                "type": "message",
+                "payload": {
+                    "id": str(message_id),
+                    "chat_id": chat_id,
+                    "sender_id": sender_id,
+                    "receiver_id": receiver_id,
+                    "sender_username": payload.get("sender_username"),
+                    "text": text,
+                    "created_at": created_at
+                }
+            }
+
+            stale = []
+            for connection in active_connections.get(chat_id, []):
+                try:
+                    connection.send(json.dumps(outgoing))
+                except Exception:
+                    stale.append(connection)
+
+            for connection in stale:
+                if connection in active_connections.get(chat_id, []):
+                    active_connections[chat_id].remove(connection)
+    finally:
+        if ws in active_connections.get(chat_id, []):
+            active_connections[chat_id].remove(ws)
 
 
 @app.route("/posts/<int:post_id>/comments", methods=["GET"])
