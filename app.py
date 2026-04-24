@@ -112,7 +112,7 @@ def login():
 
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, username FROM users WHERE username=%s AND password=%s",
+        "SELECT id, username FROM users WHERE username = %s AND password = %s",
         (data["username"], data["password"])
     )
     user = cur.fetchone()
@@ -146,6 +146,7 @@ def get_posts():
             p.caption,
             p.author_id,
             u.username,
+            u.avatar_url,
             m.url AS image_url,
             CASE WHEN p.author_id = %s THEN true ELSE false END AS is_my_post,
             COALESCE(lc.likes_count, 0) AS likes_count,
@@ -382,7 +383,9 @@ def load_profile_payload(target_user_id, current_user_id):
         SELECT
             u.id,
             u.username,
-            NULL::text AS avatar_url,
+            u.avatar_url,
+            COALESCE(u.bio, '') AS bio,
+            COALESCE(u.phone_number, '') AS phone_number,
             (SELECT COUNT(*) FROM posts WHERE author_id = u.id) AS posts_count,
             (SELECT COUNT(*) FROM follows WHERE followed_id = u.id) AS followers_count,
             (SELECT COUNT(*) FROM follows WHERE follower_id = u.id) AS following_count,
@@ -413,6 +416,7 @@ def load_profile_payload(target_user_id, current_user_id):
             p.caption,
             p.author_id,
             u.username,
+            u.avatar_url,
             m.url AS image_url,
             CASE WHEN p.author_id = %s THEN true ELSE false END AS is_my_post,
             COALESCE(lc.likes_count, 0) AS likes_count,
@@ -491,6 +495,79 @@ def get_user_profile(user_id):
     return jsonify({"user": user_info, "posts": posts, "stories": stories}), 200
 
 
+@app.route("/profile", methods=["PUT"])
+@jwt_required()
+def update_profile():
+    current_user_id = int(get_jwt_identity())
+    data = request.get_json() or {}
+
+    username = data.get("username", "").strip()
+    bio = data.get("bio", "").strip()
+    phone_number = data.get("phone_number", "").strip()
+
+    if not username:
+        return jsonify({"msg": "Username is required"}), 400
+
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"msg": "Database connection error"}), 500
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE users
+            SET username = %s, bio = %s, phone_number = %s
+            WHERE id = %s
+            """,
+            (username, bio, phone_number, current_user_id)
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return jsonify({"msg": "Failed to update profile"}), 400
+
+    cur.close()
+    conn.close()
+
+    user_info, posts, stories = load_profile_payload(current_user_id, current_user_id)
+    return jsonify({"user": user_info, "posts": posts, "stories": stories}), 200
+
+
+@app.route("/profile/avatar", methods=["POST"])
+@jwt_required()
+def upload_profile_avatar():
+    current_user_id = int(get_jwt_identity())
+
+    if "avatar" not in request.files:
+        return jsonify({"msg": "Avatar file is required"}), 400
+
+    file = request.files["avatar"]
+    if file.filename == "":
+        return jsonify({"msg": "Avatar file is required"}), 400
+
+    filename = secure_filename(f"user_{current_user_id}_{file.filename}")
+    file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+    avatar_url = f"{BASE_URL}/uploads/{filename}"
+
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"msg": "Database connection error"}), 500
+
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET avatar_url = %s WHERE id = %s",
+        (avatar_url, current_user_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return jsonify({"avatar_url": avatar_url}), 200
+
+
 @app.route("/users/<int:user_id>/follow", methods=["POST"])
 @jwt_required()
 def follow_user(user_id):
@@ -553,7 +630,7 @@ def get_followers(user_id):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT u.id, u.username, NULL::text AS avatar_url
+        SELECT u.id, u.username, u.avatar_url
         FROM follows f
         JOIN users u ON u.id = f.follower_id
         WHERE f.followed_id = %s
@@ -577,7 +654,7 @@ def get_following(user_id):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT u.id, u.username, NULL::text AS avatar_url
+        SELECT u.id, u.username, u.avatar_url
         FROM follows f
         JOIN users u ON u.id = f.followed_id
         WHERE f.follower_id = %s
@@ -611,7 +688,7 @@ def create_or_get_direct_chat():
     ensure_chat_tables(conn)
     cur = conn.cursor()
 
-    cur.execute("SELECT id, username FROM users WHERE id = %s", (recipient_id,))
+    cur.execute("SELECT id, username, avatar_url FROM users WHERE id = %s", (recipient_id,))
     other_user = cur.fetchone()
     if other_user is None:
         cur.close()
@@ -647,6 +724,7 @@ def create_or_get_direct_chat():
         "chat_id": chat_id,
         "other_user_id": other_user["id"],
         "other_username": other_user["username"],
+        "other_avatar_url": other_user["avatar_url"],
         "last_message": last_message["text"] if last_message else None,
         "last_message_at": str(last_message["created_at"]) if last_message else None,
         "unread_count": 0
@@ -676,6 +754,10 @@ def get_chats():
                 WHEN cr.user_one_id = %s THEN other_u.username
                 ELSE own_u.username
             END AS other_username,
+            CASE
+                WHEN cr.user_one_id = %s THEN other_u.avatar_url
+                ELSE own_u.avatar_url
+            END AS other_avatar_url,
             last_msg.text AS last_message,
             last_msg.created_at AS last_message_at,
             0 AS unread_count
@@ -692,7 +774,7 @@ def get_chats():
         WHERE cr.user_one_id = %s OR cr.user_two_id = %s
         ORDER BY last_msg.created_at DESC NULLS LAST, cr.created_at DESC
         """,
-        (current_user_id, current_user_id, current_user_id, current_user_id)
+        (current_user_id, current_user_id, current_user_id, current_user_id, current_user_id)
     )
     chats = cur.fetchall()
     cur.close()
@@ -729,6 +811,7 @@ def get_chat_messages(chat_id):
             cm.chat_id,
             cm.sender_id,
             sender.username AS sender_username,
+            sender.avatar_url AS sender_avatar_url,
             cm.receiver_id,
             cm.text,
             cm.created_at
@@ -790,6 +873,16 @@ def chat_socket(ws):
 
             ensure_chat_tables(conn)
             cur = conn.cursor()
+
+            cur.execute(
+                """
+                INSERT INTO chat_rooms (chat_id, user_one_id, user_two_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (chat_id) DO NOTHING
+                """,
+                (chat_id, min(sender_id, receiver_id), max(sender_id, receiver_id))
+            )
+
             cur.execute(
                 """
                 INSERT INTO chat_messages (chat_id, sender_id, receiver_id, text, created_at)
@@ -811,6 +904,7 @@ def chat_socket(ws):
                     "sender_id": sender_id,
                     "receiver_id": receiver_id,
                     "sender_username": payload.get("sender_username"),
+                    "sender_avatar_url": payload.get("sender_avatar_url"),
                     "text": text,
                     "created_at": created_at
                 }
@@ -840,7 +934,10 @@ def get_comments(post_id):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT c.*, u.username
+        SELECT
+            c.*,
+            u.username,
+            u.avatar_url
         FROM comments c
         JOIN users u ON c.user_id = u.id
         WHERE c.post_id = %s
