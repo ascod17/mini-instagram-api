@@ -46,8 +46,45 @@ def build_chat_id(user_a: int, user_b: int) -> str:
     return f"{first}_{second}"
 
 
+def ensure_social_tables(conn):
+    cur = conn.cursor()
+
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT DEFAULT ''")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT DEFAULT ''")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS follows (
+            id SERIAL PRIMARY KEY,
+            follower_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            followed_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT follows_unique UNIQUE (follower_id, followed_id),
+            CONSTRAINT follows_self_check CHECK (follower_id <> followed_id)
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS likes (
+            id SERIAL PRIMARY KEY,
+            post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT likes_unique UNIQUE (post_id, user_id)
+        )
+        """
+    )
+
+    conn.commit()
+    cur.close()
+
+
 def ensure_chat_tables(conn):
     cur = conn.cursor()
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS chat_rooms (
@@ -59,6 +96,7 @@ def ensure_chat_tables(conn):
         )
         """
     )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -67,10 +105,12 @@ def ensure_chat_tables(conn):
             sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             receiver_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             text TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            read_at TIMESTAMP NULL
         )
         """
     )
+
     conn.commit()
     cur.close()
 
@@ -87,6 +127,7 @@ def register():
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     try:
         cur.execute(
@@ -110,6 +151,7 @@ def login():
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute(
         "SELECT id, username FROM users WHERE username = %s AND password = %s",
@@ -138,6 +180,7 @@ def get_posts():
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute(
         """
@@ -201,6 +244,7 @@ def create_post():
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO posts (caption, author_id) VALUES (%s, %s) RETURNING id",
@@ -248,6 +292,7 @@ def like_post(post_id):
     if conn is None:
         return jsonify({"status": "error", "message": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute("SELECT id FROM posts WHERE id = %s", (post_id,))
     if cur.fetchone() is None:
@@ -376,6 +421,7 @@ def load_profile_payload(target_user_id, current_user_id):
     if conn is None:
         return None, None, None
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
 
     cur.execute(
@@ -512,6 +558,7 @@ def update_profile():
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     try:
         cur.execute(
@@ -556,6 +603,7 @@ def upload_profile_avatar():
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute(
         "UPDATE users SET avatar_url = %s WHERE id = %s",
@@ -580,6 +628,7 @@ def follow_user(user_id):
     if conn is None:
         return jsonify({"status": "error", "message": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
     if cur.fetchone() is None:
@@ -627,6 +676,7 @@ def get_followers(user_id):
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute(
         """
@@ -651,6 +701,7 @@ def get_following(user_id):
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute(
         """
@@ -717,6 +768,18 @@ def create_or_get_direct_chat():
     )
     last_message = cur.fetchone()
 
+    cur.execute(
+        """
+        SELECT COUNT(*) AS unread_count
+        FROM chat_messages
+        WHERE chat_id = %s
+          AND receiver_id = %s
+          AND read_at IS NULL
+        """,
+        (chat_id, current_user_id)
+    )
+    unread = cur.fetchone()
+
     cur.close()
     conn.close()
 
@@ -727,7 +790,7 @@ def create_or_get_direct_chat():
         "other_avatar_url": other_user["avatar_url"],
         "last_message": last_message["text"] if last_message else None,
         "last_message_at": str(last_message["created_at"]) if last_message else None,
-        "unread_count": 0
+        "unread_count": unread["unread_count"] if unread else 0
     }), 200
 
 
@@ -760,7 +823,7 @@ def get_chats():
             END AS other_avatar_url,
             last_msg.text AS last_message,
             last_msg.created_at AS last_message_at,
-            0 AS unread_count
+            COALESCE(unread.unread_count, 0) AS unread_count
         FROM chat_rooms cr
         JOIN users own_u ON own_u.id = cr.user_one_id
         JOIN users other_u ON other_u.id = cr.user_two_id
@@ -771,10 +834,24 @@ def get_chats():
             ORDER BY cm.created_at DESC
             LIMIT 1
         ) last_msg ON true
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS unread_count
+            FROM chat_messages cm2
+            WHERE cm2.chat_id = cr.chat_id
+              AND cm2.receiver_id = %s
+              AND cm2.read_at IS NULL
+        ) unread ON true
         WHERE cr.user_one_id = %s OR cr.user_two_id = %s
         ORDER BY last_msg.created_at DESC NULLS LAST, cr.created_at DESC
         """,
-        (current_user_id, current_user_id, current_user_id, current_user_id, current_user_id)
+        (
+            current_user_id,
+            current_user_id,
+            current_user_id,
+            current_user_id,
+            current_user_id,
+            current_user_id,
+        )
     )
     chats = cur.fetchall()
     cur.close()
@@ -790,6 +867,7 @@ def get_chat_messages(chat_id):
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_chat_tables(conn)
     cur = conn.cursor()
     cur.execute(
         """
@@ -826,6 +904,45 @@ def get_chat_messages(chat_id):
     cur.close()
     conn.close()
     return jsonify(messages), 200
+
+
+@app.route("/chats/<chat_id>/read", methods=["POST"])
+@jwt_required()
+def mark_chat_as_read(chat_id):
+    current_user_id = int(get_jwt_identity())
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"status": "error", "message": "Database connection error"}), 500
+
+    ensure_chat_tables(conn)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1
+        FROM chat_rooms
+        WHERE chat_id = %s AND (user_one_id = %s OR user_two_id = %s)
+        """,
+        (chat_id, current_user_id, current_user_id)
+    )
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return jsonify({"status": "error", "message": "Chat not found"}), 404
+
+    cur.execute(
+        """
+        UPDATE chat_messages
+        SET read_at = %s
+        WHERE chat_id = %s
+          AND receiver_id = %s
+          AND read_at IS NULL
+        """,
+        (datetime.utcnow(), chat_id, current_user_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"status": "success", "message": "Chat marked as read"}), 200
 
 
 @sock.route("/ws/chat")
@@ -885,8 +1002,8 @@ def chat_socket(ws):
 
             cur.execute(
                 """
-                INSERT INTO chat_messages (chat_id, sender_id, receiver_id, text, created_at)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO chat_messages (chat_id, sender_id, receiver_id, text, created_at, read_at)
+                VALUES (%s, %s, %s, %s, %s, NULL)
                 RETURNING id
                 """,
                 (chat_id, sender_id, receiver_id, text, created_at)
@@ -931,6 +1048,7 @@ def get_comments(post_id):
     if conn is None:
         return jsonify({"msg": "Database connection error"}), 500
 
+    ensure_social_tables(conn)
     cur = conn.cursor()
     cur.execute(
         """
