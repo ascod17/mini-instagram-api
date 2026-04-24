@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, send_from_directory
+from flask_sock import Sock
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -7,6 +8,7 @@ from datetime import timedelta
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+sock = Sock(app)
 
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "super-secret-key-123")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
