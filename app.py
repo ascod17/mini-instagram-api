@@ -115,6 +115,24 @@ def ensure_chat_tables(conn):
     cur.close()
 
 
+def ensure_advertisement_table(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advertisements (
+            id SERIAL PRIMARY KEY,
+            text TEXT NOT NULL,
+            image_url TEXT,
+            link TEXT NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.commit()
+    cur.close()
+
+
 @app.route("/uploads/<filename>")
 def uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
@@ -219,6 +237,33 @@ def get_posts():
     cur.close()
     conn.close()
     return jsonify(posts), 200
+
+
+@app.route("/advertisements", methods=["GET"])
+def get_advertisements():
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"msg": "Database connection error"}), 500
+
+    ensure_advertisement_table(conn)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            id,
+            text,
+            image_url,
+            link,
+            is_active
+        FROM advertisements
+        WHERE is_active = TRUE
+        ORDER BY id DESC
+        """
+    )
+    advertisements = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify(advertisements), 200
 
 
 @app.route("/posts", methods=["POST"])
